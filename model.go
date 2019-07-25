@@ -1,0 +1,293 @@
+package model
+
+import (
+	"context"
+	"reflect"
+
+	"github.com/gomodule/redigo/redis"
+	"github.com/jinzhu/gorm"
+	jsoniter "github.com/json-iterator/go"
+)
+
+//Model Model
+type Model interface {
+	//从库db
+	Slave() *gorm.DB
+	//主库db
+	Master() *gorm.DB
+	//额外的where条件(对主键的补充)
+	Where() *gorm.DB
+	//表名称
+	TableName() string
+
+	//RedisKey
+	RedisKey(id interface{}) string
+	//RedisStub
+	RedisStub() RedisStub
+	//redis 过期时间 秒
+	Expire() int
+}
+
+const (
+	nilCacheExpire     = 1       //避免缓存击穿，空记录在redis中的过期时间(秒)
+	defaultCacheExpire = 60 * 60 //默认过期时间
+	emptyRecordContent = "empty" //空记录在redis中的内容
+)
+
+//Get 使用主键 AND Where接口返回的条件查询
+func Get(ctx context.Context, m Model, fromCache bool) (notFound bool, err error) {
+	if !fromCache {
+		return load(m)
+	}
+
+	stub := m.RedisStub()
+	key := m.RedisKey(nil)
+
+	data, err := redis.String(stub.Do("GET", key))
+	if err == redis.ErrNil {
+		return flushCache(ctx, m)
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	if len(data) == 0 {
+		return true, nil
+	}
+
+	err = jsoniter.Unmarshal([]byte(data), m)
+	if err != nil {
+		return false, err
+	}
+
+	return false, nil
+}
+
+//BatchGet 使用主键 AND Where接口返回的条件查询
+func BatchGet(ctx context.Context, m Model, ids interface{}, fromCache bool) (interface{}, error) {
+	if !fromCache {
+		return batchLoad(m, ids)
+	}
+
+	stub := m.RedisStub()
+	v := reflect.ValueOf(ids)
+
+	keys := make([]interface{}, 0, v.Len())
+	for i := 0; i < v.Len(); i++ {
+		key := m.RedisKey(v.Index(i).Interface())
+		keys = append(keys, key)
+	}
+
+	data, err := redis.Strings(stub.Do("MGET", keys...))
+	if err != nil {
+		return nil, err
+	}
+
+	noCached := reflect.MakeSlice(reflect.TypeOf(ids), 0, 0)
+	elemType := reflect.ValueOf(m).Type()
+	cachedResults := reflect.MakeSlice(reflect.SliceOf(elemType), 0, 0)
+
+	for i := 0; i < len(data); i++ {
+		if data[i] != emptyRecordContent {
+			elemType := reflect.ValueOf(m).Type()
+			elem := reflect.New(elemType)
+			err = jsoniter.Unmarshal([]byte(data[i]), elem.Interface())
+			if err != nil {
+				noCached = reflect.Append(noCached, v.Index(i))
+			} else {
+				cachedResults = reflect.Append(cachedResults, elem.Elem())
+			}
+		}
+	}
+
+	if noCached.Len() > 0 {
+		noCachedResults, err := multiFlushCache(ctx, m, noCached.Interface())
+		if err != nil {
+			return cachedResults.Interface(), err
+		}
+
+		return reflect.AppendSlice(cachedResults, reflect.ValueOf(noCachedResults)).Interface(), nil
+	}
+
+	return cachedResults.Interface(), nil
+}
+
+//Insert Insert
+func Insert(ctx context.Context, m Model) error {
+	return create(m)
+}
+
+//Delete 使用主键 AND Where接口返回的条件Delete
+func Delete(ctx context.Context, m Model) error {
+	err := delete(m)
+	stub := m.RedisStub()
+	if stub != nil {
+		stub.Do("DEL", m.RedisKey(nil))
+	}
+	return err
+}
+
+//Update 使用主键 AND Where接口返回的条件Update。如果fields为空，更新所有字段
+func Update(ctx context.Context, m Model, fields map[string]interface{}) error {
+	err := update(m, fields)
+	stub := m.RedisStub()
+	if stub != nil {
+		stub.Do("DEL", m.RedisKey(nil))
+	}
+	return err
+}
+
+func flushCache(ctx context.Context, m Model) (bool, error) {
+	noRecord, err := load(m)
+	if err != nil {
+		return false, err
+	}
+
+	stub := m.RedisStub()
+	key := m.RedisKey(nil)
+
+	if noRecord {
+		stub.Do("SET", key, "")
+	} else {
+		s, err := jsoniter.Marshal(m)
+		if err != nil {
+			return false, err
+		}
+		stub.Do("SET", key, string(s))
+	}
+
+	if noRecord {
+		stub.Do("EXPIRE", key, nilCacheExpire)
+	} else {
+		expire := m.Expire()
+		if expire <= 0 {
+			expire = defaultCacheExpire
+		}
+		stub.Do("EXPIRE", key, expire)
+	}
+	return noRecord, nil
+}
+
+func multiFlushCache(ctx context.Context, m Model, ids interface{}) (interface{}, error) {
+	loaded, err := batchLoad(m, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	stub := m.RedisStub()
+
+	var cmds []interface{}
+	v := reflect.ValueOf(loaded)
+	for i := 0; i < v.Len(); i++ {
+		item := v.Index(i).Interface().(Model)
+		s, err := jsoniter.Marshal(item)
+		if err != nil {
+			return nil, err
+		}
+		key := item.RedisKey(nil)
+		cmds = append(cmds, key, s)
+	}
+
+	if len(cmds) > 0 {
+		stub.Do("MSET", cmds...)
+	}
+
+	expire := m.Expire()
+	if expire <= 0 {
+		expire = defaultCacheExpire
+	}
+
+	v = reflect.ValueOf(ids)
+	for i := 0; i < v.Len(); i++ {
+		key := m.RedisKey(v.Index(i).Interface())
+		reply, err := redis.Int(stub.Do("EXPIRE", key, expire))
+		if err != nil {
+			return nil, err
+		}
+		if reply != 1 {
+			stub.Do("SET", key, emptyRecordContent, "EX", nilCacheExpire, "NX")
+		}
+	}
+
+	return loaded, nil
+}
+
+func create(m Model) error {
+	err := m.Master().Create(m).Error
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func delete(m Model) error {
+	var db *gorm.DB
+	if m.Where() != nil {
+		db = m.Where()
+	} else {
+		db = m.Master()
+	}
+
+	err := db.Delete(m).Error
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func load(m Model) (bool, error) {
+	var db *gorm.DB
+	if m.Where() != nil {
+		db = m.Where()
+	} else {
+		db = m.Slave()
+	}
+
+	db = db.Take(m)
+	if db.RecordNotFound() {
+		return true, nil
+	}
+	if db.Error != nil {
+		return false, db.Error
+	}
+	return false, nil
+}
+
+func update(m Model, fields map[string]interface{}) error {
+	var db *gorm.DB
+	if m.Where() != nil {
+		db = m.Where()
+	} else {
+		db = m.Master()
+	}
+
+	var err error
+	if len(fields) == 0 {
+		err = db.Model(m).Save(m).Error
+	} else {
+		err = db.Model(m).Updates(fields).Error
+	}
+
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func batchLoad(m Model, ids interface{}) (interface{}, error) {
+	elemType := reflect.ValueOf(m).Type()
+	sliceValue := reflect.MakeSlice(reflect.SliceOf(elemType), 0, 0)
+	results := reflect.New(sliceValue.Type())
+	iresults := results.Interface()
+
+	var db *gorm.DB
+	if m.Where() != nil {
+		db = m.Where()
+	} else {
+		db = m.Slave()
+	}
+
+	db = db.Table(m.TableName()).Where("id in (?)", ids).Find(iresults)
+	return results.Elem().Interface(), db.Error
+}
