@@ -22,7 +22,7 @@ func init() {
 		panic(err)
 	}
 
-	pool = newPool("127.0.0.1:6200", "123456")
+	pool = newPool("127.0.0.1:6379", "")
 
 	etcdClient, err = clientv3.New(clientv3.Config{
 		Endpoints: []string{"127.0.0.1:2379"},
@@ -42,6 +42,10 @@ func newPool(addr string, pwd string) *redis.Pool {
 }
 
 func main() {
+	pool.Get().Do("FLUSHDB")
 	simple()
-	//list()
+	pool.Get().Do("FLUSHDB")
+	hsimple()
+
+	list()
 }

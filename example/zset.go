@@ -9,11 +9,17 @@ import (
 	"github.com/erberry/model"
 )
 
+//排序列表存储到redis zset中
+
 func (t ModelA) RedisListKey() string {
-	return "table_20190719:list"
+	return "zset:list"
 }
 
-func (t ModelA) Load(offset, limit int) ([]model.Z, error) {
+func (t ModelA) ListLen() int {
+	return 0
+}
+
+func (t ModelA) Load(ctx context.Context, offset, limit int) ([]model.Z, error) {
 	var arr []ModelA
 	err := db.Select("id, age").Order("age").Offset(offset).Limit(limit).Find(&arr).Error
 	if err != nil {
@@ -45,7 +51,7 @@ func list() {
 	for i := 0; i < 5500; i++ {
 		//insert
 		ta := ModelA{Name: "hello" + strconv.Itoa(i), Age: i}
-		if model.Insert(context.TODO(), &ta) != nil || ta.ID == 0 {
+		if err := db.Create(&ta).Error; err != nil {
 			fmt.Println("failed")
 			return
 		}
@@ -56,7 +62,7 @@ func list() {
 	limit = 50
 	for i := 0; i < 120; i++ {
 		offset = i * limit
-		zs, total, err := model.GetByPage(a, offset, limit, false)
+		zs, total, err := model.GetByPage(context.TODO(), a, offset, limit, false)
 		if err != nil {
 			fmt.Println("failed")
 			return
@@ -78,5 +84,5 @@ func list() {
 		}
 	}
 
-	fmt.Println("success")
+	fmt.Println("zset success")
 }

@@ -179,7 +179,7 @@ func HUpdate(ctx context.Context, m Model, fields map[string]interface{}) error 
 	err := update(m, fields)
 	stub := m.RedisStub()
 	if stub != nil && err == nil {
-		e, err := redis.Int(stub.Do("EXIST", m.RedisKey(nil)))
+		e, err := redis.Int(stub.Do("EXISTS", m.RedisKey(nil)))
 		if err != nil || e != 1 {
 			return err
 		}
@@ -198,7 +198,7 @@ func HIncr(ctx context.Context, m Model, fields map[string]interface{}) error {
 	err := incr(m, fields)
 	stub := m.RedisStub()
 	if stub != nil && err == nil {
-		e, err := redis.Int(stub.Do("EXIST", m.RedisKey(nil)))
+		e, err := redis.Int(stub.Do("EXISTS", m.RedisKey(nil)))
 		if err != nil || e != 1 {
 			return err
 		}
@@ -234,11 +234,11 @@ func flushHCache(ctx context.Context, m Model) (bool, error) {
 	if noRecord {
 		stub.Do("EXPIRE", key, nilCacheExpire)
 	} else {
-		expire := m.Expire()
+		expire := int(m.RedisExpire().Seconds())
 		if expire <= 0 {
 			expire = defaultCacheExpire
 		}
-		stub.Do("EXPIRE", key, m.Expire())
+		stub.Do("EXPIRE", key, expire)
 	}
 	return noRecord, nil
 }
@@ -262,7 +262,7 @@ func multiFlushHCache(ctx context.Context, m Model, ids interface{}) (interface{
 	}
 
 	stub := m.RedisStub()
-	expire := m.Expire()
+	expire := int(m.RedisExpire().Seconds())
 	if expire <= 0 {
 		expire = defaultCacheExpire
 	}
