@@ -1,8 +1,8 @@
 package model
 
 import (
+	"context"
 	"errors"
-	"math/rand"
 	"time"
 
 	"github.com/gomodule/redigo/redis"
@@ -17,19 +17,31 @@ type Z struct {
 //List List
 type List interface {
 	//分页加载方法
-	Load(offset, limit int) ([]Z, error)
+	Load(ctx context.Context, offset, limit int) ([]Z, error)
 
 	//RedisListKey
 	RedisListKey() string
+	//RedisExpire
+	RedisExpire() time.Duration
 	//RedisStub
 	RedisStub() RedisStub
+	//ListLen
+	ListLen() int
 
 	//GetLocker
 	GetLocker() Locker
 }
 
+var (
+	ErrOutOfRange = errors.New("out of range")
+)
+
 //GetByPage GetByPage
-func GetByPage(l List, offset, limit int, reverse bool) ([]Z, int, error) {
+func GetByPage(ctx context.Context, l List, offset, limit int, reverse bool) ([]Z, int, error) {
+	if l.ListLen() > 0 && offset > l.ListLen() {
+		return []Z{}, 0, ErrOutOfRange
+	}
+
 	key := l.RedisListKey()
 	stub := l.RedisStub()
 
@@ -39,8 +51,11 @@ func GetByPage(l List, offset, limit int, reverse bool) ([]Z, int, error) {
 	}
 	if exist != 1 {
 		//load
-		err := loadList(l, true)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		err := loadList(ctx, l, true)
 		if err != nil {
+			log.Error("load list of " + key + " failed")
 			return []Z{}, 0, err
 		}
 	}
@@ -79,7 +94,7 @@ func GetByPage(l List, offset, limit int, reverse bool) ([]Z, int, error) {
 }
 
 //UpdateList UpdateList
-func UpdateList(l List, z Z) error {
+func UpdateList(ctx context.Context, l List, z Z) error {
 	key := l.RedisListKey()
 	stub := l.RedisStub()
 	exist, err := redis.Int(stub.Do("EXISTS", key))
@@ -91,11 +106,33 @@ func UpdateList(l List, z Z) error {
 	}
 
 	_, err = stub.Do("ZADD", key, z.Score, z.Field)
+	if l.ListLen() > 0 {
+		total, err := redis.Int(stub.Do("ZCARD", key))
+		if err == nil && total > l.ListLen() {
+			stub.Do("ZREMRANGEBYRANK", key, 0, total-l.ListLen()-1)
+		}
+	}
+	return err
+}
+
+//Rem Rem
+func Rem(ctx context.Context, l List, field string) error {
+	key := l.RedisListKey()
+	stub := l.RedisStub()
+	exist, err := redis.Int(stub.Do("EXISTS", key))
+	if err != nil {
+		return err
+	}
+	if exist != 1 {
+		return nil
+	}
+
+	_, err = stub.Do("ZREM", key, field)
 	return err
 }
 
 //ReloadList ReloadList
-func ReloadList(l List) error {
+func ReloadList(ctx context.Context, l List) error {
 	key := l.RedisListKey()
 	stub := l.RedisStub()
 
@@ -112,11 +149,15 @@ func ReloadList(l List) error {
 		return err
 	}
 
-	return loadList(l, false)
+	err = loadList(ctx, l, false)
+	if err != nil {
+		log.Error("load list of " + key + " failed")
+	}
+	return err
 }
 
 //loadList loadList
-func loadList(l List, needLock bool) error {
+func loadList(ctx context.Context, l List, needLock bool) error {
 	key := l.RedisListKey()
 	stub := l.RedisStub()
 
@@ -137,10 +178,15 @@ func loadList(l List, needLock bool) error {
 		return nil
 	}
 
+	log.Info("start load list of " + key)
+
 	offset := 0
-	limit := 1000
+	limit := 300
 	for {
-		zs, err := l.Load(offset, limit)
+		if l.ListLen() > 0 && offset >= l.ListLen() {
+			break
+		}
+		zs, err := l.Load(ctx, offset, limit)
 		if err != nil {
 			return err
 		}
@@ -162,23 +208,12 @@ func loadList(l List, needLock bool) error {
 		}
 	}
 
-	total, _ := redis.Int(stub.Do("ZCARD", key))
-	expire := determinExpire(int(total))
-	stub.Do("EXPIRE", key, int(expire.Seconds()))
+	expire := l.RedisExpire()
+	if expire > 0 {
+		stub.Do("EXPIRE", key, int(expire.Seconds()))
+	}
+
+	log.Info("end load list of " + key)
 
 	return nil
-}
-
-func determinExpire(pCount int) time.Duration {
-	if pCount < 100 {
-		return 1 * time.Hour
-	} else if pCount < 1000 {
-		return 24 * time.Hour
-	} else if pCount < 10000 {
-		return time.Duration(7*24+rand.Intn(7*12)) * time.Hour
-	} else if pCount < 50000 {
-		return time.Duration(14*24+rand.Intn(7*12)) * time.Hour
-	} else {
-		return time.Duration(30*24+rand.Intn(7*12)) * time.Hour
-	}
 }

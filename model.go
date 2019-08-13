@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 
+	goRedis "github.com/go-redis/redis"
 	"github.com/gomodule/redigo/redis"
 	"github.com/jinzhu/gorm"
 	jsoniter "github.com/json-iterator/go"
@@ -11,12 +12,8 @@ import (
 
 //Model Model
 type Model interface {
-	//从库db
-	Slave() *gorm.DB
-	//主库db
-	Master() *gorm.DB
-	//额外的where条件(对主键的补充)
-	Where() *gorm.DB
+	//查询条件 批量查询传入ids
+	Where(ids interface{}) *gorm.DB
 	//表名称
 	TableName() string
 
@@ -29,22 +26,26 @@ type Model interface {
 }
 
 const (
-	nilCacheExpire     = 1       //避免缓存击穿，空记录在redis中的过期时间(秒)
-	defaultCacheExpire = 60 * 60 //默认过期时间
-	emptyRecordContent = "empty" //空记录在redis中的内容
+	nilCacheExpire     = 1                        //避免缓存击穿，空记录在redis中的过期时间(秒)
+	emptyRecordContent = "empty-5030573512345671" //空记录在redis中的内容
+	emptyHashField     = "empty-5030573512345671"
+	emptyHashValue     = "empty-v-5030573512345671"
+	mustExistField     = "must-exist-5030573512345671"
+	mustExistValue     = "must-exist-v-5030573512345671"
+	defaultCacheExpire = 60 * 60
 )
 
-//Get 使用主键 AND Where接口返回的条件查询
+//Get Where接口返回的条件查询
 func Get(ctx context.Context, m Model, fromCache bool) (notFound bool, err error) {
 	if !fromCache {
-		return load(m)
+		return load(m, nil)
 	}
 
 	stub := m.RedisStub()
 	key := m.RedisKey(nil)
 
 	data, err := redis.String(stub.Do("GET", key))
-	if err == redis.ErrNil {
+	if err == redis.ErrNil || err == goRedis.Nil {
 		return flushCache(ctx, m)
 	}
 
@@ -64,7 +65,7 @@ func Get(ctx context.Context, m Model, fromCache bool) (notFound bool, err error
 	return false, nil
 }
 
-//BatchGet 使用主键 AND Where接口返回的条件查询
+//BatchGet Where接口返回的条件查询
 func BatchGet(ctx context.Context, m Model, ids interface{}, fromCache bool) (interface{}, error) {
 	if !fromCache {
 		return batchLoad(m, ids)
@@ -113,33 +114,28 @@ func BatchGet(ctx context.Context, m Model, ids interface{}, fromCache bool) (in
 	return cachedResults.Interface(), nil
 }
 
-//Insert Insert
-func Insert(ctx context.Context, m Model) error {
-	return create(m)
-}
-
-//Delete 使用主键 AND Where接口返回的条件Delete
+//Delete Where接口返回的条件Delete
 func Delete(ctx context.Context, m Model) error {
 	err := delete(m)
 	stub := m.RedisStub()
-	if stub != nil {
+	if stub != nil && err == nil {
 		stub.Do("DEL", m.RedisKey(nil))
 	}
 	return err
 }
 
-//Update 使用主键 AND Where接口返回的条件Update。如果fields为空，更新所有字段
+//Update Where接口返回的条件Update。如果fields为空，更新所有字段
 func Update(ctx context.Context, m Model, fields map[string]interface{}) error {
 	err := update(m, fields)
 	stub := m.RedisStub()
-	if stub != nil {
+	if stub != nil && err == nil {
 		stub.Do("DEL", m.RedisKey(nil))
 	}
 	return err
 }
 
 func flushCache(ctx context.Context, m Model) (bool, error) {
-	noRecord, err := load(m)
+	noRecord, err := load(m, nil)
 	if err != nil {
 		return false, err
 	}
@@ -164,7 +160,7 @@ func flushCache(ctx context.Context, m Model) (bool, error) {
 		if expire <= 0 {
 			expire = defaultCacheExpire
 		}
-		stub.Do("EXPIRE", key, expire)
+		stub.Do("EXPIRE", key, m.Expire())
 	}
 	return noRecord, nil
 }
@@ -213,35 +209,19 @@ func multiFlushCache(ctx context.Context, m Model, ids interface{}) (interface{}
 	return loaded, nil
 }
 
-func create(m Model) error {
-	err := m.Master().Create(m).Error
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 func delete(m Model) error {
-	var db *gorm.DB
-	if m.Where() != nil {
-		db = m.Where()
-	} else {
-		db = m.Master()
-	}
-
-	err := db.Delete(m).Error
+	err := m.Where(nil).Delete(m).Error
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func load(m Model) (bool, error) {
-	var db *gorm.DB
-	if m.Where() != nil {
-		db = m.Where()
-	} else {
-		db = m.Slave()
+func load(m Model, fields []string) (bool, error) {
+	db := m.Where(nil)
+
+	if fields != nil && len(fields) > 0 {
+		db = db.Select(fields)
 	}
 
 	db = db.Take(m)
@@ -255,12 +235,7 @@ func load(m Model) (bool, error) {
 }
 
 func update(m Model, fields map[string]interface{}) error {
-	var db *gorm.DB
-	if m.Where() != nil {
-		db = m.Where()
-	} else {
-		db = m.Master()
-	}
+	db := m.Where(nil)
 
 	var err error
 	if len(fields) == 0 {
@@ -281,13 +256,8 @@ func batchLoad(m Model, ids interface{}) (interface{}, error) {
 	results := reflect.New(sliceValue.Type())
 	iresults := results.Interface()
 
-	var db *gorm.DB
-	if m.Where() != nil {
-		db = m.Where()
-	} else {
-		db = m.Slave()
-	}
+	db := m.Where(ids)
 
-	db = db.Table(m.TableName()).Where("id in (?)", ids).Find(iresults)
+	db = db.Table(m.TableName()).Find(iresults)
 	return results.Elem().Interface(), db.Error
 }
