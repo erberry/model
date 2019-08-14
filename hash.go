@@ -50,8 +50,8 @@ func HMGet(ctx context.Context, m Model, fields []string, fromCache bool) (notFo
 			return flushHCache(ctx, m)
 		}
 
-		if values != nil && len(values) == 2 {
-			if s, ok := values[0].(string); ok && s == emptyHashValue {
+		if values != nil && len(values) >= 2 {
+			if s, ok := values[0].(string); ok && s == emptyHashField {
 				return true, nil
 			}
 		}
@@ -142,8 +142,8 @@ func BatchHMGet(ctx context.Context, m Model, ids interface{}, fields []string, 
 				continue
 			}
 
-			if values != nil && len(values) == 2 {
-				if s, ok := values[0].(string); ok && s == emptyHashValue {
+			if values != nil && len(values) >= 2 {
+				if s, ok := values[0].(string); ok && s == emptyHashField {
 					continue
 				}
 			}
