@@ -145,10 +145,15 @@ func BatchHMGet(ctx context.Context, m Model, ids interface{}, fields []string, 
 			}
 
 			if values != nil {
+				var emptyHash bool
 				for _, v := range values {
 					if s, ok := v.(string); ok && s == emptyHashField {
-						return true, nil
+						emptyHash = true
+						break
 					}
+				}
+				if emptyHash {
+					continue
 				}
 			}
 		}
