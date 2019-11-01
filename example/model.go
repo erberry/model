@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"strconv"
-	"time"
 
 	"github.com/erberry/model"
 	"github.com/jinzhu/gorm"
@@ -37,8 +36,8 @@ func (t ModelA) RedisKey(id interface{}) string {
 func (t ModelA) RedisStub() model.RedisStub {
 	return pool.Get()
 }
-func (t ModelA) RedisExpire() time.Duration {
-	return 200 * time.Second
+func (t ModelA) Expire() int {
+	return 200
 }
 
 //ModelB ModelB
@@ -70,6 +69,6 @@ func (t ModelB) TableName() string {
 func (t ModelB) RedisStub() model.RedisStub {
 	return pool.Get()
 }
-func (t ModelB) RedisExpire() time.Duration {
-	return 200 * time.Second
+func (t ModelB) Expire() int {
+	return 200
 }

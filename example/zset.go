@@ -15,6 +15,10 @@ func (t ModelA) RedisListKey() string {
 	return "zset:list"
 }
 
+func (t ModelA) RedisExpire() time.Duration {
+	return 200 * time.Second
+}
+
 func (t ModelA) ListLen() int {
 	return 0
 }
@@ -62,7 +66,7 @@ func list() {
 	limit = 50
 	for i := 0; i < 120; i++ {
 		offset = i * limit
-		zs, total, err := model.GetByPage(context.TODO(), a, offset, limit, false)
+		zs, total, err := model.GetByPage(context.TODO(), a, offset, limit)
 		if err != nil {
 			fmt.Println("failed")
 			return

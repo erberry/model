@@ -24,7 +24,7 @@ func HMGet(ctx context.Context, m Model, fields []string, fromCache bool) (notFo
 	)
 
 	if fields != nil && len(fields) > 0 {
-		args := make([]interface{}, 0, len(fields)+1)
+		args := make([]interface{}, 0, len(fields)+3)
 		args = append(args, key)
 		args = append(args, emptyHashField)
 		args = append(args, mustExistField)
@@ -50,7 +50,7 @@ func HMGet(ctx context.Context, m Model, fields []string, fromCache bool) (notFo
 			return flushHCache(ctx, m)
 		}
 
-		if values != nil {
+		if values != nil && len(values) >= 2 {
 			for _, v := range values {
 				if s, ok := v.(string); ok && s == emptyHashField {
 					return true, nil
@@ -86,18 +86,21 @@ func BatchHMGet(ctx context.Context, m Model, ids interface{}, fields []string, 
 	v := reflect.ValueOf(ids)
 	getAll := fields == nil || len(fields) == 0
 
+	var args []interface{}
+	if !getAll {
+		args = make([]interface{}, len(fields)+3)
+		args[1] = emptyHashField
+		args[2] = mustExistField
+		for i, f := range fields {
+			args[i+3] = f
+		}
+	}
+
 	for i := 0; i < v.Len(); i++ {
 		key := m.RedisKey(v.Index(i).Interface())
 
 		if !getAll {
-			args := make([]interface{}, 0, len(fields)+1)
-			args = append(args, key)
-			args = append(args, emptyHashField)
-			args = append(args, mustExistField)
-			for _, f := range fields {
-				args = append(args, f)
-			}
-
+			args[0] = key
 			err := stub.Send("HMGET", args...)
 			if err != nil {
 				return nil, err
@@ -243,11 +246,11 @@ func flushHCache(ctx context.Context, m Model) (bool, error) {
 	if noRecord {
 		stub.Do("EXPIRE", key, nilCacheExpire)
 	} else {
-		expire := int(m.RedisExpire().Seconds())
+		expire := m.Expire()
 		if expire <= 0 {
 			expire = defaultCacheExpire
 		}
-		stub.Do("EXPIRE", key, expire)
+		stub.Do("EXPIRE", key, m.Expire())
 	}
 	return noRecord, nil
 }
@@ -271,7 +274,7 @@ func multiFlushHCache(ctx context.Context, m Model, ids interface{}) (interface{
 	}
 
 	stub := m.RedisStub()
-	expire := int(m.RedisExpire().Seconds())
+	expire := m.Expire()
 	if expire <= 0 {
 		expire = defaultCacheExpire
 	}

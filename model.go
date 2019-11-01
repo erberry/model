@@ -3,7 +3,6 @@ package model
 import (
 	"context"
 	"reflect"
-	"time"
 
 	goRedis "github.com/go-redis/redis"
 	"github.com/gomodule/redigo/redis"
@@ -23,7 +22,7 @@ type Model interface {
 	//RedisStub
 	RedisStub() RedisStub
 	//redis 过期时间 秒
-	RedisExpire()  time.Duration
+	Expire() int
 }
 
 const (
@@ -157,11 +156,11 @@ func flushCache(ctx context.Context, m Model) (bool, error) {
 	if noRecord {
 		stub.Do("EXPIRE", key, nilCacheExpire)
 	} else {
-		expire := int(m.RedisExpire().Seconds())
+		expire := m.Expire()
 		if expire <= 0 {
 			expire = defaultCacheExpire
 		}
-		stub.Do("EXPIRE", key, expire)
+		stub.Do("EXPIRE", key, m.Expire())
 	}
 	return noRecord, nil
 }
@@ -190,7 +189,7 @@ func multiFlushCache(ctx context.Context, m Model, ids interface{}) (interface{}
 		stub.Do("MSET", cmds...)
 	}
 
-	expire := int(m.RedisExpire().Seconds())
+	expire := m.Expire()
 	if expire <= 0 {
 		expire = defaultCacheExpire
 	}
